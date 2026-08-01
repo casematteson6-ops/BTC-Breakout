@@ -40,6 +40,7 @@ import numpy as np
 from datetime import datetime, timezone
 from match_trader_api import MatchTraderClient
 from trade_logger import init_db, log_trade_open, log_trade_close
+from master_account_safety import handle_master_account_safety
 
 BOT_NAME = "rsi_divergence"
 
@@ -97,14 +98,14 @@ GRANULARITY  = "H1"
 CANDLE_COUNT = 100
 
 # ForexLab-validated parameters
-RSI_PERIOD      = 14
-LOOKBACK_PERIOD = 30
-MIN_RSI_GAP     = 8.0
-ATR_PERIOD      = 10
-ATR_SL_MULT     = 1.0
-ATR_TP_MULT     = 5.0
+RSI_PERIOD      = 18
+LOOKBACK_PERIOD = 58
+MIN_RSI_GAP     = 4.5
+ATR_PERIOD      = 6
+ATR_SL_MULT     = 0.6
+ATR_TP_MULT     = 4.9
 
-RISK_PCT     = 0.004   # 0.4% per trade -- corrected for 5 bots sharing ONE $10k account
+RISK_PCT     = 0.003   # 0.30% per trade -- re-tuned for permanent Master-mode weekend safety
 LOOP_SLEEP   = 300     # Scan every 5 minutes
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
@@ -158,6 +159,11 @@ def main():
 
             positions = client.get_open_positions(INSTRUMENT)
             _log_position_sample_once(positions)
+
+            if handle_master_account_safety(client, active_trade, BOT_NAME, send_telegram):
+                active_trade = None
+                time.sleep(LOOP_SLEEP)
+                continue
 
             my_position = _find_own_position(positions, active_trade["position_id"]) if active_trade else None
 
