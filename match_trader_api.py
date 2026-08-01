@@ -53,7 +53,6 @@ class MatchTraderClient:
         self.auth_token    = None
         self.trading_token = None
         self.token_expiry  = datetime.min
-        self._logged_candle_sample = False
 
     # ── Authentication ─────────────────────────────────────────────────────────
 
@@ -318,32 +317,17 @@ class MatchTraderClient:
             logger.warning(f"No candles returned for {symbol}")
             return None
 
-        # One-time diagnostic so the real field name for volume (if any) can
-        # be confirmed from live logs -- Match Trader's candle payload shape
-        # isn't documented anywhere we have access to, so this is a defensive
-        # guess across the common naming conventions, verified against a
-        # real sample rather than assumed.
-        if not self._logged_candle_sample:
-            logger.info(f"🔎 Sample candle object (verify volume field name): {candles[0]}")
-            self._logged_candle_sample = True
-
         try:
             rows = []
             for c in candles:
-                volume = (
-                    c.get("volume", c.get("v",
-                    c.get("tickVolume", c.get("tick_volume",
-                    c.get("baseVolume", c.get("vol", None))))))
-                )
                 rows.append({
-                    "open":   float(c.get("open",  c.get("o", 0))),
-                    "high":   float(c.get("high",  c.get("h", 0))),
-                    "low":    float(c.get("low",   c.get("l", 0))),
-                    "close":  float(c.get("close", c.get("c", 0))),
-                    "volume": float(volume) if volume is not None else float("nan"),
+                    "open":  float(c.get("open",  c.get("o", 0))),
+                    "high":  float(c.get("high",  c.get("h", 0))),
+                    "low":   float(c.get("low",   c.get("l", 0))),
+                    "close": float(c.get("close", c.get("c", 0))),
                 })
             df = pd.DataFrame(rows)
-            df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+            df.dropna(inplace=True)
             df.reset_index(drop=True, inplace=True)
             # Drop the last (incomplete) candle
             if len(df) > 1:
