@@ -39,9 +39,54 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from match_trader_api import MatchTraderClient
+from trade_logger import init_db, log_trade_open, log_trade_close
+
+BOT_NAME = "rsi_divergence"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# ── Shared-symbol position helpers ──────────────────────────────────────────
+# Match Trader is confirmed to use independent tickets (not netted positions),
+# so multiple bots CAN safely hold separate same-direction positions on one
+# symbol. What must still be avoided is an actual HEDGE (opposite-direction
+# positions on the same symbol), which Funding Pips prohibits outright.
+# Field names below are defensive guesses based on this API's own confirmed
+# conventions (orderId/positionId, orderSide) -- the first log line below
+# prints a raw sample so these can be verified against real data.
+_logged_position_sample = {"done": False}
+
+def _log_position_sample_once(positions):
+    if positions and not _logged_position_sample["done"]:
+        logger.info(f"🔎 Sample position object (verify field names): {positions[0]}")
+        _logged_position_sample["done"] = True
+
+def _position_id(pos):
+    return pos.get("orderId") or pos.get("positionId") or pos.get("id")
+
+def _position_direction(pos):
+    val = pos.get("orderSide") or pos.get("side") or pos.get("direction")
+    return str(val).upper() if val else None
+
+def _find_own_position(positions, my_order_id):
+    if not positions or not my_order_id:
+        return None
+    for p in positions:
+        if str(_position_id(p)) == str(my_order_id):
+            return p
+    return None
+
+def _has_conflicting_direction(positions, my_side):
+    """True if any OTHER open position on this symbol is in the opposite
+    direction -- opening into this would be a real hedge (banned)."""
+    if not positions:
+        return False
+    my_side = my_side.upper()
+    for p in positions:
+        other_side = _position_direction(p)
+        if other_side and other_side != my_side:
+            return True
+    return False
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -100,6 +145,7 @@ def main():
 
     logger.info("⚡ RSI Divergence Bot Started.")
     send_telegram("⚡ RSI Divergence Bot Started | BTC/USD | Risk: 0.4%")
+    init_db()
 
     active_trade = None
 
@@ -111,14 +157,19 @@ def main():
                 continue
 
             positions = client.get_open_positions(INSTRUMENT)
+            _log_position_sample_once(positions)
 
-            # Manage existing trade (trailing SL)
-            if positions and active_trade:
+            my_position = _find_own_position(positions, active_trade["position_id"]) if active_trade else None
+
+            # Manage existing trade (trailing SL) -- only while MY position is
+            # confirmed still open, not just "some position on this symbol exists"
+            if active_trade and my_position:
                 df = client.get_candles(INSTRUMENT, 50, GRANULARITY)
                 if df is not None:
                     df = compute_indicators(df)
                     last = df.iloc[-1]
                     price, atr = last["close"], last["atr"]
+                    active_trade["last_price"] = price
 
                     if active_trade["side"] == "BUY":
                         new_sl = round(price - ATR_SL_MULT * atr, 2)
@@ -135,13 +186,31 @@ def main():
                 time.sleep(LOOP_SLEEP)
                 continue
 
-            if not positions and active_trade:
-                send_telegram("✅ BTC/USD Divergence position closed.")
+            if active_trade and not my_position:
+                balance_after = client.get_balance()
+                realized_pnl = None
+                if balance_after is not None and active_trade.get("balance_before") is not None:
+                    realized_pnl = round(balance_after - active_trade["balance_before"], 2)
+                log_trade_close(
+                    bot_name=BOT_NAME,
+                    order_id=active_trade["position_id"],
+                    exit_price=active_trade.get("last_price"),
+                    exit_time=datetime.now(timezone.utc),
+                    realized_pnl=realized_pnl,
+                )
+                pnl_str = f" | PnL: ${realized_pnl}" if realized_pnl is not None else ""
+                send_telegram(f"✅ BTC/USD Divergence position closed.{pnl_str}")
                 active_trade = None
 
-            if positions:
+            if active_trade:
+                # Still waiting on a position we opened but haven't confirmed
+                # yet, or an edge case where my_position lookup needs a retry.
                 time.sleep(LOOP_SLEEP)
                 continue
+
+            # active_trade is None here -- look for a new signal regardless of
+            # what other bots are doing on BTC/USD. A direction check right
+            # before placing the order (below) still guards against hedging.
 
             # Signal Detection
             df = client.get_candles(INSTRUMENT, CANDLE_COUNT, GRANULARITY)
@@ -193,10 +262,23 @@ def main():
                 sl = round(close + sl_dist, 2)
                 tp = round(close - tp_dist, 2)
                 logger.info(f"🔽 SHORT BTC/USD (Bearish Divergence) | Entry:{close} SL:{sl} TP:{tp}")
-                order_id, err = client.open_position(INSTRUMENT, "SELL", lots, sl, tp)
-                if order_id:
-                    active_trade = {"position_id": order_id, "side": "SELL", "sl": sl, "tp": tp}
-                    send_telegram(f"✅ SHORT BTC/USD Divergence Opened\nEntry: {close} | SL: {sl} | TP: {tp}")
+                if _has_conflicting_direction(positions, "SELL"):
+                    logger.info("⏸ Skipping SHORT signal -- another bot holds an opposing (LONG) "
+                                "BTC/USD position. Opening would be a hedge, which Funding Pips prohibits.")
+                else:
+                    order_id, err = client.open_position(INSTRUMENT, "SELL", lots, sl, tp)
+                    if order_id:
+                        entry_time = datetime.now(timezone.utc)
+                        active_trade = {
+                            "position_id": order_id, "side": "SELL", "sl": sl, "tp": tp,
+                            "balance_before": balance, "last_price": close,
+                        }
+                        log_trade_open(
+                            bot_name=BOT_NAME, symbol=INSTRUMENT, direction="SELL",
+                            order_id=order_id, entry_price=close, entry_time=entry_time,
+                            sl=sl, tp=tp, lot_size=lots,
+                        )
+                        send_telegram(f"✅ SHORT BTC/USD Divergence Opened\nEntry: {close} | SL: {sl} | TP: {tp}")
 
             # Bullish divergence -> LONG
             elif (
@@ -206,10 +288,23 @@ def main():
                 sl = round(close - sl_dist, 2)
                 tp = round(close + tp_dist, 2)
                 logger.info(f"🔼 LONG BTC/USD (Bullish Divergence) | Entry:{close} SL:{sl} TP:{tp}")
-                order_id, err = client.open_position(INSTRUMENT, "BUY", lots, sl, tp)
-                if order_id:
-                    active_trade = {"position_id": order_id, "side": "BUY", "sl": sl, "tp": tp}
-                    send_telegram(f"✅ LONG BTC/USD Divergence Opened\nEntry: {close} | SL: {sl} | TP: {tp}")
+                if _has_conflicting_direction(positions, "BUY"):
+                    logger.info("⏸ Skipping LONG signal -- another bot holds an opposing (SHORT) "
+                                "BTC/USD position. Opening would be a hedge, which Funding Pips prohibits.")
+                else:
+                    order_id, err = client.open_position(INSTRUMENT, "BUY", lots, sl, tp)
+                    if order_id:
+                        entry_time = datetime.now(timezone.utc)
+                        active_trade = {
+                            "position_id": order_id, "side": "BUY", "sl": sl, "tp": tp,
+                            "balance_before": balance, "last_price": close,
+                        }
+                        log_trade_open(
+                            bot_name=BOT_NAME, symbol=INSTRUMENT, direction="BUY",
+                            order_id=order_id, entry_price=close, entry_time=entry_time,
+                            sl=sl, tp=tp, lot_size=lots,
+                        )
+                        send_telegram(f"✅ LONG BTC/USD Divergence Opened\nEntry: {close} | SL: {sl} | TP: {tp}")
 
         except Exception as e:
             logger.error(f"🔥 Error: {e}")
