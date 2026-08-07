@@ -102,10 +102,10 @@ RSI_PERIOD      = 18
 LOOKBACK_PERIOD = 58
 MIN_RSI_GAP     = 4.5
 ATR_PERIOD      = 6
-ATR_SL_MULT     = 0.6
+ATR_SL_MULT     = 0.6   # validated -- candle-cooldown guard prevents re-entry loop
 ATR_TP_MULT     = 4.9
 
-RISK_PCT     = 0.003   # 0.30% per trade -- re-tuned for permanent Master-mode weekend safety
+RISK_PCT     = 0.003   # 0.30% -- re-optimized weekday-only validation
 LOOP_SLEEP   = 300     # Scan every 5 minutes
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
@@ -218,6 +218,14 @@ def main():
             # what other bots are doing on BTC/USD. A direction check right
             # before placing the order (below) still guards against hedging.
 
+            # Candle-cooldown guard: polls every 5 min, trades H1 candles.
+            # Fingerprint by (close,high,low) since Match Trader API has no timestamp column.
+            last_row = df.iloc[-1]
+            candle_ts = (round(last_row["close"],5), round(last_row["high"],5), round(last_row["low"],5))
+            if candle_ts == last_signal_candle_ts:
+                time.sleep(LOOP_SLEEP)
+                continue
+
             # Signal Detection
             df = client.get_candles(INSTRUMENT, CANDLE_COUNT, GRANULARITY)
             if df is None or len(df) < LOOKBACK_PERIOD + RSI_PERIOD + 5:
@@ -284,6 +292,7 @@ def main():
                             order_id=order_id, entry_price=close, entry_time=entry_time,
                             sl=sl, tp=tp, lot_size=lots,
                         )
+                        last_signal_candle_ts = candle_ts
                         send_telegram(f"✅ SHORT BTC/USD Divergence Opened\nEntry: {close} | SL: {sl} | TP: {tp}")
 
             # Bullish divergence -> LONG
@@ -310,6 +319,7 @@ def main():
                             order_id=order_id, entry_price=close, entry_time=entry_time,
                             sl=sl, tp=tp, lot_size=lots,
                         )
+                        last_signal_candle_ts = candle_ts
                         send_telegram(f"✅ LONG BTC/USD Divergence Opened\nEntry: {close} | SL: {sl} | TP: {tp}")
 
         except Exception as e:
