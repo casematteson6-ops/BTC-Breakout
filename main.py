@@ -98,14 +98,14 @@ GRANULARITY  = "H1"
 CANDLE_COUNT = 100
 
 # ForexLab-validated parameters
-RSI_PERIOD      = 18
-LOOKBACK_PERIOD = 58
-MIN_RSI_GAP     = 4.5
-ATR_PERIOD      = 6
-ATR_SL_MULT     = 0.6   # validated -- candle-cooldown guard prevents re-entry loop
-ATR_TP_MULT     = 4.9
+RSI_PERIOD      = 17
+LOOKBACK_PERIOD = 15
+MIN_RSI_GAP     = 3.0
+ATR_PERIOD      = 18
+ATR_SL_MULT     = 1.5   # wide -- tight stops don't survive real BTC slippage (measured ~17pt avg)
+ATR_TP_MULT     = 6.0
 
-RISK_PCT     = 0.003   # 0.30% -- re-optimized weekday-only validation
+RISK_PCT     = 0.0032   # 0.32% -- validated against real measured slippage, 4-bot portfolio
 LOOP_SLEEP   = 300     # Scan every 5 minutes
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
