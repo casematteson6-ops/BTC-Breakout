@@ -105,7 +105,7 @@ ATR_PERIOD      = 18
 ATR_SL_MULT     = 1.5   # wide -- tight stops don't survive real BTC slippage (measured ~17pt avg)
 ATR_TP_MULT     = 6.0
 
-RISK_PCT     = 0.0032   # 0.32% -- validated against real measured slippage, 4-bot portfolio
+RISK_PCT     = 0.0024   # 0.24% -- risk-reallocated: borderline walk-forward evidence (3/5 folds)
 LOOP_SLEEP   = 300     # Scan every 5 minutes
 
 # ── Telegram ───────────────────────────────────────────────────────────────────
